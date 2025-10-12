@@ -101,7 +101,7 @@ def main():
                 if brand_allowed(brand, ALLOWED_BRANDS):
                     print(f"New item: Title: {item.title}, Price: {item.price} {item.currency}, URL: {item.url}")
                     # Send to webhook
-                    image_url = item.photos[0].url if hasattr(item, 'photos') and item.photos else ""
+                    image_url = item.photo if hasattr(item, 'photo') else ""
                     sent = send_discord_embed(
                         WEBHOOK_URL,
                         item.title,
