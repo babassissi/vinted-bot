@@ -1,12 +1,14 @@
 # bot_vinted_new.py
 import time
-import json
-import requests
-import cloudscraper
-from bs4 import BeautifulSoup
+import os
+from dotenv import load_dotenv
+from pyVinted import Vinted
+import requests  # For webhook
 
 # ---------- CONFIG ---------- #
-WEBHOOK_URL = "https://discordapp.com/api/webhooks/1424838729272655938/xcXUXdPipAQO41z8m92st7th0krihjIlcsRNJTbhEv2x0vg2EVjR1GWvqdEgRCxhThQO"  # <-- remplace par ton webhook
+load_dotenv()  # Load .env file
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Get from .env: WEBHOOK_URL=your_discord_webhook_here
+
 ALLOWED_BRANDS = [
     "nike", "adidas", "ralph lauren", "c.p company", "carhartt", "stüssy",
     "scuffers", "lacoste", "stone island", "the north face", "asics", "salomon",
@@ -16,76 +18,14 @@ COUNTRY = "fr"
 MAX_PRICE = 1000           # en euros
 CATALOG_ID = 257           # ex: 257 = pantalon homme (garde le tien)
 POLL_INTERVAL = 6          # secondes entre chaque recherche
-USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
 # ---------------------------- #
 
-scraper = cloudscraper.create_scraper()
+vinted = Vinted()
 
-def get_search_url(catalog_id, price_to, country, page=1):
-    # On utilise la recherche publique (page HTML) ; on peut ajouter search_text si besoin
-    return (f"https://www.vinted.fr/vetements?"
-            f"catalog[]= {catalog_id}&order=newest_first&price_to={price_to}&currency=EUR&country_code={country}&page={page}").replace(" ", "")
-
-def parse_items_from_html(html):
-    soup = BeautifulSoup(html, "html.parser")
-    # Sélection des boîtes d'item — attribut commun observé : data-testid="item-box"
-    items = soup.select("a[data-testid='item-box']")
-    parsed = []
-    for a in items:
-        try:
-            href = a.get("href") or ""
-            url = "https://www.vinted.fr" + href if href.startswith("/") else href
-
-            # Titre : plusieurs pages mettent un title sur <a> ou un <h3> à l'intérieur
-            title = a.get("title") or ""
-            if not title:
-                h3 = a.find("h3")
-                if h3:
-                    title = h3.get_text(strip=True)
-
-            # Image : <img> dans le bloc
-            img_tag = a.find("img")
-            image = img_tag.get("src") or img_tag.get("data-src") if img_tag else ""
-
-            # Prix : souvent dans un span avec aria-label ou class contenant "price"
-            price = "Not found"
-            price_tag = a.select_one("[data-testid='price']") or a.select_one("span[itemprop='price']")
-            if price_tag:
-                price = price_tag.get_text(strip=True)
-            else:
-                # fallback : chercher le texte contenant "€"
-                possible = a.get_text(" ", strip=True)
-                if "€" in possible:
-                    # extrait premier morceau contenant €
-                    for part in possible.split():
-                        if "€" in part:
-                            price = part
-                            break
-
-            # Marque : parfois un data ou un span avec brand ; sinon absent
-            brand = "Not found"
-            brand_tag = a.select_one("[data-testid='brand']") or a.select_one(".brand, .item-brand")
-            if brand_tag:
-                brand = brand_tag.get_text(strip=True)
-            else:
-                # fallback : essayer d'extraire du titre
-                parts = title.split()
-                if parts:
-                    brand_candidate = parts[0].lower()
-                    brand = brand_candidate
-
-            parsed.append({
-                "url": url,
-                "title": title,
-                "image": image,
-                "price": price,
-                "brand": brand
-            })
-        except Exception:
-            # ignore a single item parse failure
-            continue
-    return parsed
+def get_search_url(catalog_id, price_to):
+    # Build the search URL that pyVinted uses to fetch items
+    return (f"https://www.vinted.{COUNTRY}/vetements?"
+            f"catalog[]={catalog_id}&order=newest_first&price_to={price_to}&currency=EUR")
 
 def brand_allowed(brand_name, allowed_list):
     if not brand_name:
@@ -103,7 +43,7 @@ def send_discord_embed(webhook_url, title, item_url, image_url, brand, price):
                 "title": "Nouvel article Vinted",
                 "description": f"[Voir l'annonce]({item_url})",
                 "color": 3447003,
-                "image": {"url": image_url},
+                "image": {"url": image_url} if image_url else None,
                 "fields": [
                     {"name": "Titre", "value": title or "N/A", "inline": False},
                     {"name": "Marque", "value": brand or "N/A", "inline": True},
@@ -121,68 +61,64 @@ def send_discord_embed(webhook_url, title, item_url, image_url, brand, price):
         return False
 
 def main():
-    print("[+] Démarrage du bot Vinted (nouvelle version)")
-    sent_items = set()
+    if not WEBHOOK_URL:
+        print("[!] WEBHOOK_URL not found in .env file. Add it and restart.")
+        return
 
-    page = 1
+    print("[+] Démarrage du bot Vinted (nouvelle version - using pyVinted + Webhook)")
+    seen_items = set()
+
     while True:
         try:
-            url = get_search_url(CATALOG_ID, MAX_PRICE, COUNTRY, page=1)
-            headers = {"User-Agent": USER_AGENT, "Referer": "https://www.vinted.fr/"}
-            resp = scraper.get(url, headers=headers, timeout=15)
-            if resp.status_code != 200:
-                print(f"[!] Erreur HTTP: {resp.status_code} pour {url}")
-                time.sleep(POLL_INTERVAL)
-                continue
-
-            items = parse_items_from_html(resp.text)
+            search_url = get_search_url(CATALOG_ID, MAX_PRICE)
+            items = vinted.items.search(search_url, 30, 1)
             print(f"[i] Articles trouvés: {len(items)}")
 
-            for it in items:
-                # Optionnel: extraire un id simple depuis l'url (si possible)
-                item_id = it["url"].split("/")[-1] if it["url"] else it["title"]
-                # Nettoyage et vérifs
-                brand = it.get("brand", "")
-                price_text = it.get("price", "")
-                # essayer de détecter la valeur numérique si possible
-                price_num = None
-                try:
-                    # enlever caractères non numériques sauf la virgule/point
-                    cleaned = "".join(ch for ch in price_text if (ch.isdigit() or ch in ".,"))
-                    if cleaned:
-                        price_num = float(cleaned.replace(",", "."))
-                except Exception:
-                    price_num = None
+            # Print all fetched items in a simple table for verification (optional - remove if not needed)
+            print("\n--- Items Table (All Fetched) ---")
+            print(f"{'Title':<60} {'Price':<10} {'URL'}")
+            print("-" * 130)
+            for item in items:
+                title_short = item.title[:57] if len(item.title) > 57 else item.title
+                print(f"{title_short:<60} {item.price:<10} {item.url}")
+            print("--- End Table ---\n")
 
-                def brand_allowed(brand_name, allowed_list):
-                 if not allowed_list:
-                  return True  # Si la liste est vide, on accepte tout
-                 if not brand_name:
-                     return False
+            new_count = 0
+            for item in items:
+                item_id = str(item.id)
+                if not item_id:
+                    continue
 
-
-
+                # Price check - convert to float
+                price_num = float(item.price) if item.price else None
                 if price_num is not None and price_num > MAX_PRICE:
                     continue
 
-                if item_id in sent_items:
-                    # déjà envoyé
+                if item_id in seen_items:
                     continue
 
-                sent = send_discord_embed(
-                    WEBHOOK_URL,
-                    it.get("title"),
-                    it.get("url"),
-                    it.get("image"),
-                    brand,
-                    it.get("price")
-                )
+                brand = item.brand_title or ""
+                if brand_allowed(brand, ALLOWED_BRANDS):
+                    print(f"New item: Title: {item.title}, Price: {item.price} {item.currency}, URL: {item.url}")
+                    # Send to webhook
+                    image_url = item.photos[0].url if hasattr(item, 'photos') and item.photos else ""
+                    sent = send_discord_embed(
+                        WEBHOOK_URL,
+                        item.title,
+                        item.url,
+                        image_url,
+                        brand,
+                        f"{item.price} {item.currency}"
+                    )
+                    if sent:
+                        print(f"[+] Sent to webhook!")
+                    else:
+                        print(f"[!] Failed to send to webhook.")
+                    new_count += 1
+                    seen_items.add(item_id)
 
-                if sent:
-                    print(f"[+] Envoyé: {it.get('title')}")
-                    sent_items.add(item_id)
-                else:
-                    print(f"[!] Échec envoi pour: {it.get('title')}")
+            if new_count == 0:
+                print("[i] No new items matching brands this poll.")
 
             time.sleep(POLL_INTERVAL)
 
