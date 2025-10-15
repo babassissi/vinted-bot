@@ -1,13 +1,17 @@
-# bot_vinted_new.py
+# bot_vinted_fixed.py
 import time
 import os
+import random
 from dotenv import load_dotenv
+from fake_useragent import UserAgent
+import requests
 from pyVinted import Vinted
-import requests  # For webhook
+import warnings
+warnings.filterwarnings("ignore")
 
 # ---------- CONFIG ---------- #
-load_dotenv()  # Load .env file
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Get from .env: WEBHOOK_URL=your_discord_webhook_here
+load_dotenv()
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 ALLOWED_BRANDS = [
     "nike", "adidas", "ralph lauren", "c.p company", "carhartt", "stüssy",
@@ -15,15 +19,41 @@ ALLOWED_BRANDS = [
     "levis", "corteiz", "ami paris"
 ]
 COUNTRY = "fr"
-MAX_PRICE = 1000           # en euros
-CATALOG_ID = 257           # ex: 257 = pantalon homme (garde le tien)
-POLL_INTERVAL = 6          # secondes entre chaque recherche
+MAX_PRICE = 1000
+CATALOG_ID = 257
+POLL_INTERVAL = 20  # Augmenté pour éviter blocage
 # ---------------------------- #
 
+ua = UserAgent()
+
+# Initialiser Vinted SANS headers (par défaut)
 vinted = Vinted()
 
+# Monkey patch pour injecter les headers dans les requêtes de pyVinted
+original_request = requests.Session.get
+def custom_get(self, url, **kwargs):
+    # Injecter headers anti-detection
+    headers = kwargs.get('headers', {})
+    headers.update({
+        'User-Agent': ua.random,
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8',
+        'Referer': f'https://www.vinted.{COUNTRY}/',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'same-origin',
+        'X-Requested-With': 'XMLHttpRequest',
+    })
+    kwargs['headers'] = headers
+    
+    # Délai aléatoire avant requête
+    time.sleep(random.uniform(0.5, 2))
+    
+    return original_request(self, url, **kwargs)
+
+# Appliquer le patch
+requests.Session.get = custom_get
+
 def get_search_url(catalog_id, price_to):
-    # Build the search URL that pyVinted uses to fetch items
     return (f"https://www.vinted.{COUNTRY}/vetements?"
             f"catalog[]={catalog_id}&order=newest_first&price_to={price_to}&currency=EUR")
 
@@ -38,96 +68,122 @@ def brand_allowed(brand_name, allowed_list):
 
 def send_discord_embed(webhook_url, title, item_url, image_url, brand, price):
     embed = {
-        "embeds": [
-            {
-                "title": "Nouvel article Vinted",
-                "description": f"[Voir l'annonce]({item_url})",
-                "color": 3447003,
-                "image": {"url": image_url} if image_url else None,
-                "fields": [
-                    {"name": "Titre", "value": title or "N/A", "inline": False},
-                    {"name": "Marque", "value": brand or "N/A", "inline": True},
-                    {"name": "Prix", "value": price or "N/A", "inline": True}
-                ],
-                "footer": {"text": "Bot Vinted - mis à jour"}
-            }
-        ]
+        "embeds": [{
+            "title": "🆕 Nouvel article Vinted",
+            "description": f"[Voir l'annonce]({item_url})",
+            "color": 3447003,
+            "image": {"url": image_url} if image_url else None,
+            "fields": [
+                {"name": "📝 Titre", "value": title[:100] + "..." if len(title) > 100 else title, "inline": False},
+                {"name": "🏷️ Marque", "value": brand or "N/A", "inline": True},
+                {"name": "💰 Prix", "value": f"{price} €", "inline": True}
+            ],
+            "footer": {"text": f"Bot Vinted - {time.strftime('%H:%M:%S')}"}
+        }]
     }
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json", 'User-Agent': ua.random}
     try:
-        r = requests.post(webhook_url, json=embed, headers=headers, timeout=10)
+        r = requests.post(webhook_url, json=embed, headers=headers, timeout=15)
         return r.status_code in (200, 204)
-    except Exception:
+    except Exception as e:
+        print(f"[!] Erreur webhook: {e}")
         return False
 
 def main():
     if not WEBHOOK_URL:
-        print("[!] WEBHOOK_URL not found in .env file. Add it and restart.")
+        print("[!] WEBHOOK_URL manquant dans .env")
         return
 
-    print("[+] Démarrage du bot Vinted (nouvelle version - using pyVinted + Webhook)")
+    print("[+] 🚀 Bot Vinted anti-blocage démarré")
+    print(f"[i] Catalog: {CATALOG_ID}, Prix max: {MAX_PRICE}€, Intervalle: {POLL_INTERVAL}s")
     seen_items = set()
+    consecutive_errors = 0
 
     while True:
         try:
+            # Délai aléatoire
+            sleep_time = random.uniform(POLL_INTERVAL, POLL_INTERVAL + 10)
+            print(f"[i] ⏳ Attente {sleep_time:.1f}s...")
+            time.sleep(sleep_time)
+            
             search_url = get_search_url(CATALOG_ID, MAX_PRICE)
-            items = vinted.items.search(search_url, 30, 1)
-            print(f"[i] Articles trouvés: {len(items)}")
-
-            # Print all fetched items in a simple table for verification (optional - remove if not needed)
-            print("\n--- Items Table (All Fetched) ---")
-            print(f"{'Title':<60} {'Price':<10} {'URL'}")
-            print("-" * 130)
-            for item in items:
-                title_short = item.title[:57] if len(item.title) > 57 else item.title
-                print(f"{title_short:<60} {item.price:<10} {item.url}")
-            print("--- End Table ---\n")
-
+            print(f"[i] 🔍 Recherche: {search_url.split('?')[0]}...")
+            
+            # Recherche avec moins d'items
+            items = vinted.items.search(search_url, 10, 1)
+            consecutive_errors = 0
+            
+            print(f"[✓] 📦 {len(items)} articles trouvés")
+            
             new_count = 0
             for item in items:
-                item_id = str(item.id)
-                if not item_id:
-                    continue
+                try:
+                    item_id = str(getattr(item, 'id', ''))
+                    if not item_id or item_id in seen_items:
+                        continue
 
-                # Price check - convert to float
-                price_num = float(item.price) if item.price else None
-                if price_num is not None and price_num > MAX_PRICE:
-                    continue
+                    # Prix
+                    price_str = str(getattr(item, 'price', '0')).replace('€', '').replace(',', '.')
+                    price_num = float(price_str) if price_str else 0
+                    if price_num > MAX_PRICE:
+                        continue
 
-                if item_id in seen_items:
-                    continue
+                    # Marque
+                    brand = getattr(item, 'brand_title', '') or getattr(item, 'brand_name', '')
+                    if not brand_allowed(brand, ALLOWED_BRANDS):
+                        continue
 
-                brand = item.brand_title or ""
-                if brand_allowed(brand, ALLOWED_BRANDS):
-                    print(f"New item: Title: {item.title}, Price: {item.price} {item.currency}, URL: {item.url}")
-                    # Send to webhook
-                    image_url = item.photo if hasattr(item, 'photo') else ""
+                    print(f"[🆕] {brand} - {getattr(item, 'title', 'N/A')[:50]}... {price_num}€")
+                    
+                    # Image
+                    image_url = (getattr(item, 'photo', '') or 
+                               (getattr(item, 'images', [None])[0] if hasattr(item, 'images') else ""))
+                    
+                    # Webhook
                     sent = send_discord_embed(
                         WEBHOOK_URL,
-                        item.title,
-                        item.url,
+                        getattr(item, 'title', 'N/A'),
+                        getattr(item, 'url', ''),
                         image_url,
                         brand,
-                        f"{item.price} {item.currency}"
+                        f"{price_num:.2f}"
                     )
+                    
                     if sent:
-                        print(f"[+] Sent to webhook!")
+                        print(f"[✅] Discord envoyé!")
+                        new_count += 1
+                        seen_items.add(item_id)
                     else:
-                        print(f"[!] Failed to send to webhook.")
-                    new_count += 1
-                    seen_items.add(item_id)
+                        print(f"[❌] Échec Discord")
+                    
+                    # Délai après envoi
+                    time.sleep(random.uniform(1, 2))
+                    
+                except Exception as e:
+                    print(f"[!] Erreur item: {e}")
+                    continue
 
             if new_count == 0:
-                print("[i] No new items matching brands this poll.")
+                print(f"[i] Aucun nouvel article ({len(seen_items)} vus)")
+            print("-" * 50)
 
-            time.sleep(POLL_INTERVAL)
-
-        except KeyboardInterrupt:
-            print("[*] Arrêt manuel reçu, sortie.")
-            break
         except Exception as e:
-            print(f"[!] Exception: {e}")
-            time.sleep(10)
+            consecutive_errors += 1
+            print(f"[!] Erreur: {e}")
+            if "403" in str(e):
+                print(f"[!] 🚫 403 détecté ({consecutive_errors}/5)")
+                if consecutive_errors >= 3:
+                    print("[!] Pause 10min...")
+                    time.sleep(600)
+                    consecutive_errors = 0
+                else:
+                    time.sleep(120)
+            else:
+                time.sleep(30)
+                
+        except KeyboardInterrupt:
+            print("\n[*] Arrêt manuel")
+            break
 
 if __name__ == "__main__":
     main()

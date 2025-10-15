@@ -1,0 +1,67 @@
+Metadata-Version: 2.4
+Name: pyVinted
+Version: 0.5.3
+Summary: Vinted API wrapper for python
+Home-page: https://github.com/aime-risson/vinted-api-wrapper
+Author: Aimé Risson
+Author-email: aime.risson.1@gmail.fr
+Keywords: python,Vinted api,Vinted API wrapper,python vinted
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Classifier: Intended Audience :: Education
+Requires-Python: >=3.6
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: requests
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: keywords
+Dynamic: license-file
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
+# Vinted-Api-Wrapper
+Simple python package that uses the Vinted API to search new posts.
+
+## Install
+Simpely install package using pip :
+```
+pip install pyVinted
+```
+## Example
+
+```py
+from pyVinted import Vinted
+
+vinted = Vinted()
+
+# search(url, number_of_items, page_number)
+items = vinted.items.search("https://www.vinted.fr/vetement?order=newest_first&price_to=60&currency=EUR",10,1)
+#returns a list of objects: item
+
+```
+You can access Item attributes as shown here:
+```py
+item1 = items[0]
+#title
+item1.title
+#id
+item1.id
+#photo url
+item1.photo
+#brand
+item1.brand_title
+#price
+item1.price
+#url
+item1.url
+#currency
+item1.currency
+```
+
